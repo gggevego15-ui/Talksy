@@ -1,0 +1,132 @@
+name: Build Talksy artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'server/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/build-artifacts.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-server:
+    name: Build Windows server EXE
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Talksy
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Build server
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          go build -trimpath -tags "mysql rethinkdb mongodb postgres" -ldflags="-s -w" -o dist/talksy-server.exe ./server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Include server config and setup notes
+        shell: pwsh
+        run: |
+          Copy-Item server/tinode.conf dist/tinode.conf
+          @'
+          Talksy server build
+          -------------------
+          talksy-server.exe is the backend server, not a desktop chat application.
+          It requires a configured database and server configuration.
+          Review tinode.conf before running it. Do not expose it publicly with default settings.
+          '@ | Set-Content -Encoding utf8 dist/README.txt
+
+      - name: Upload Windows EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: talksy-windows-server
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  android-base:
+    name: Build Android client base APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Tinode Android client
+        uses: actions/checkout@v4
+        with:
+          repository: tinode/tindroid
+          fetch-depth: 0
+          path: tindroid
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Prepare build-only local configuration
+        working-directory: tindroid
+        shell: bash
+        run: |
+          # The upstream project expects these local files even for a debug build.
+          # This placeholder Firebase config permits compilation only; push notifications
+          # will not work until a real Firebase project is configured.
+          cat > app/google-services.json <<'JSON'
+          {
+            "project_info": {
+              "project_number": "123456789000",
+              "project_id": "talksy-build-placeholder",
+              "storage_bucket": "talksy-build-placeholder.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:123456789000:android:0123456789abcdef",
+                  "android_client_info": {
+                    "package_name": "co.tinode.tindroidx"
+                  }
+                },
+                "api_key": [
+                  {
+                    "current_key": "placeholder-build-only-api-key"
+                  }
+                ]
+              }
+            ],
+            "configuration_version": "1"
+          }
+          JSON
+
+          keytool -genkeypair -v             -keystore "$RUNNER_TEMP/talksy-build-only.jks"             -storepass buildonlypass             -alias buildonly             -keypass buildonlypass             -keyalg RSA -keysize 2048 -validity 2             -dname "CN=Talksy CI Build, OU=CI, O=Talksy, L=Local, S=Local, C=US"
+
+          cat > keystore.properties <<EOF
+          storeFile=$RUNNER_TEMP/talksy-build-only.jks
+          storePassword=buildonlypass
+          keyAlias=buildonly
+          keyPassword=buildonlypass
+          EOF
+
+      - name: Build debug APK
+        working-directory: tindroid
+        shell: bash
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Upload Android base APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tindroid-android-debug-base
+          path: tindroid/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
