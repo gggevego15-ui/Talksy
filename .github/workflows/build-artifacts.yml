@@ -81,6 +81,13 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The legacy SDK package named "tools" no longer exists in Google's repository.
+          # Install the packages required by the project's compileSdkVersion 36 explicitly.
+          packages: |
+            platform-tools
+            platforms;android-36
+            build-tools;36.0.0
 
       - name: Prepare build-only local configuration
         working-directory: tindroid
